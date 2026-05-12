@@ -23,6 +23,11 @@ func (e *SdkError) Error() string {
 }
 
 func (e *SdkError) Is(err error) bool {
+	// Check if comparing against self
+	if e == err {
+		return true
+	}
+	// Check if comparing against the raw sentinel error (for cloned errors)
 	return e.raw == err
 }
 
