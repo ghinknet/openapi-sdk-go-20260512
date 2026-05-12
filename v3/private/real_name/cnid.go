@@ -1,4 +1,4 @@
-package realName
+package realname
 
 import (
 	"fmt"
@@ -7,8 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"go.gh.ink/openapi/sdk/20260422/v3"
-	"go.gh.ink/openapi/sdk/20260422/v3/client"
+	"go.gh.ink/openapi/sdk/20260512/v3/errors"
+	"go.gh.ink/toolbox/xtype"
+
+	"go.gh.ink/openapi/sdk/20260512/v3/client"
 )
 
 // IsValidID checks whether the ID is a valid Chinese Mainland ID
@@ -95,7 +97,7 @@ func VerifyCNID(c *client.Client, id string, name string) (ok bool, err error) {
 	}
 
 	// Build payload
-	payload := openapi.MapAny{
+	payload := xtype.MS[string]{
 		"id":   id,
 		"name": name,
 	}
@@ -110,7 +112,10 @@ func VerifyCNID(c *client.Client, id string, name string) (ok bool, err error) {
 		c.Logger.Error(nil, fmt.Sprintf(
 			"failed to verify CNID, sender error: %s", result.Err.Error(),
 		))
-		return false, result.Err
+		return false, errors.ErrRequestSendFailed.
+			WithApiCode(result.Code).
+			WithApiMessage(result.Msg).
+			WithResponse(result)
 	}
 
 	// Check status code
@@ -118,7 +123,10 @@ func VerifyCNID(c *client.Client, id string, name string) (ok bool, err error) {
 		c.Logger.Error(nil, fmt.Sprintf(
 			"failed to verify CNID, upstream failed: code: %d, msg: %s", result.Code, result.Msg,
 		))
-		return false, fmt.Errorf("failed to verify CNID, upstream failed: code: %d, msg: %s", result.Code, result.Msg)
+		return false, errors.ErrStatusError.
+			WithApiCode(result.Code).
+			WithApiMessage(result.Msg).
+			WithResponse(result)
 	}
 
 	// Build verify result struct
@@ -129,9 +137,12 @@ func VerifyCNID(c *client.Client, id string, name string) (ok bool, err error) {
 	// Unmarshal token data
 	if err = result.Unmarshal(&Ok); err != nil {
 		c.Logger.Error(nil, fmt.Sprintf(
-			"failed to verify CNID, unmarshal error: %s", result.Err.Error(),
+			"failed to verify CNID, unmarshal error: %s", err.Error(),
 		))
-		return false, err
+		return false, errors.ErrResponseUnmarshalFailed.
+			WithApiCode(result.Code).
+			WithApiMessage(result.Msg).
+			WithResponse(result)
 	}
 
 	return Ok.Ok, nil

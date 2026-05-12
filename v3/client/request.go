@@ -1,22 +1,25 @@
 package client
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
-	"go.gh.ink/openapi/sdk/20260422/v3"
+	"go.gh.ink/openapi/sdk/20260512/v3"
 )
 
-// Result provides a basic struct to return result
+// Result provides the parsed API response
+// Note: Code is the business-logic error code from API response (not HTTP status code)
+// HTTP status codes are handled before parsing and are in the range 200-299 for success
 type Result struct {
 	client *Client
-	Code   int
-	Msg    string
-	Body   []byte
-	Err    error
+	Code   int    // Business error code from API response (200 = success, 801 = permission denied, etc.)
+	Msg    string // Business error message from API response
+	Body   []byte // Parsed response body (typically the "data" field from API response)
+	Err    error  // Error during request/response processing (not API business logic errors)
 }
 
 // Sender provides a basic struct to send request
@@ -25,6 +28,9 @@ type Sender struct {
 	request *http.Request
 	err     error
 }
+
+// AuthType defines the authentication method
+type AuthType int
 
 // Send provides a sender to send request
 func (c *Client) Send(url string, method string, payload any) *Sender {
@@ -64,12 +70,16 @@ func (c *Client) Send(url string, method string, payload any) *Sender {
 	}
 }
 
-// parse returns parsed body data
+// parse returns parsed body data from API response
+// It extracts the business-layer error code (result.Code), message (result.Msg),
+// and data field from the API response JSON
+// Note: The Code field is business-logic error code (e.g., 200 = success, 801 = permission denied),
+// NOT the HTTP status code (which is in res.StatusCode)
 func (s *Sender) parse(body []byte) *Result {
 	var result struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data any    `json:"data"`
+		Code int    `json:"code"`    // Business error code
+		Msg  string `json:"msg"`     // Business error message
+		Data any    `json:"data"`    // Business response data
 	}
 
 	// unmarshal body
@@ -98,118 +108,21 @@ func (s *Sender) parse(body []byte) *Result {
 	}
 }
 
-// WithToken sends a request with token to authorise
-func (s *Sender) WithToken() *Result {
-	// Handle error
-	if s.err != nil {
-		return &Result{
-			client: s.client,
-			Err:    s.err,
-		}
+// setupAuthHeader sets authorisation header based on auth type
+func (s *Sender) setupAuthHeader(authType AuthType) {
+	switch authType {
+	case AuthTypeToken:
+		s.request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.client.token))
+	case AuthTypeKey:
+		credentials := strings.Join([]string{s.client.secretID, s.client.secretKey}, ":")
+		encoded := base64.StdEncoding.EncodeToString([]byte(credentials))
+		s.request.Header.Set("Authorization", strings.Join([]string{"Basic", encoded}, " "))
 	}
-
-	// Copy retry delay
-	retryDelay := s.client.retryDelay
-
-	for attempt := 0; attempt < s.client.maxRetries; attempt++ {
-		if result := func() *Result {
-			// Construct client
-			client := &http.Client{
-				Timeout: time.Duration(s.client.timeout) * time.Second,
-			}
-
-			// Add headers
-			s.request.Header.Add("Authorization", strings.Join([]string{"Bearer ", s.client.token}, ""))
-			s.request.Header.Add("User-Agent", openapi.UserAgent)
-
-			// Send request
-			s.client.Logger.Debug(nil, fmt.Sprintf(
-				"send request to %s, method %s with token (attempt %d)", s.request.URL, s.request.Method, attempt+1,
-			))
-			res, err := client.Do(s.request)
-			if err != nil {
-				s.client.Logger.Debug(nil, fmt.Sprintf("request failed: %v, retrying...", err))
-				return nil // Retry on network errors
-			}
-			defer func(Body io.ReadCloser) {
-				_ = Body.Close()
-			}(res.Body)
-
-			// Handler http code error
-			if res.StatusCode != http.StatusOK {
-				s.client.Logger.Debug(nil, fmt.Sprintf("received HTTP status %d, retrying...", res.StatusCode))
-				return nil // Retry on non-200 status codes
-			}
-
-			// Get request result
-			body, err := io.ReadAll(res.Body)
-			if err != nil {
-				s.client.Logger.Debug(nil, fmt.Sprintf("failed to read response body: %v, retrying...", err))
-				return nil // Retry on body read errors
-			}
-
-			// Parse result
-			parsed := s.parse(body)
-
-			// Output log
-			var bodyRaw any
-			if err = s.client.unmarshal(body, &bodyRaw); err != nil {
-				s.client.Logger.Debug(nil, fmt.Sprintf("failed to unmarshal response body: %v, retrying...", err))
-				return nil // Retry on unmarshal errors
-			}
-			s.client.Logger.Debug(nil, fmt.Sprintf(
-				"openAPI response httpCode %d, apiCode %d, responseBody %s",
-				res.StatusCode, parsed.Code, fmt.Sprint(bodyRaw),
-			))
-
-			// Check failed reason
-			if parsed.Code == 801 {
-				s.client.Logger.Debug(nil, "permission denied, maybe token expired, try to renew")
-
-				// Sleep to prevent too many requests
-				time.Sleep(time.Duration(retryDelay) * time.Second)
-
-				if s.client.exponentialBackoff {
-					retryDelay *= 2 // Exponential backoff
-				}
-
-				if err = applyToken(s.client); err != nil {
-					return &Result{
-						client: s.client,
-						Err:    err,
-					}
-				}
-
-				return nil // Retry after token renewal
-			}
-
-			// Return parsed result
-			return parsed
-		}(); result != nil {
-			return result
-		}
-
-		// Wait before retrying
-		if attempt < s.client.maxRetries-1 {
-			s.client.Logger.Debug(nil, fmt.Sprintf("retrying in %v...", retryDelay))
-
-			time.Sleep(time.Duration(retryDelay) * time.Second)
-
-			if s.client.exponentialBackoff {
-				retryDelay *= 2 // Exponential backoff
-			}
-		}
-	}
-
-	// If all retries failed, return an error
-	return &Result{
-		client: s.client,
-		Err:    fmt.Errorf("request failed after %d retries", s.client.maxRetries),
-	}
+	s.request.Header.Set("User-Agent", openapi.UserAgent)
 }
 
-// WithKey sends a request with SecretID and SecretKey to authorize
-func (s *Sender) WithKey() *Result {
+// doRequest executes the common request retry logic
+func (s *Sender) doRequest(authType AuthType, authTypeStr string) *Result {
 	// Handle error
 	if s.err != nil {
 		return &Result{
@@ -229,12 +142,11 @@ func (s *Sender) WithKey() *Result {
 			}
 
 			// Add headers
-			s.request.Header.Add("Authorization", fmt.Sprintf("Basic %s:%s", s.client.secretID, s.client.secretKey))
-			s.request.Header.Add("User-Agent", openapi.UserAgent)
+			s.setupAuthHeader(authType)
 
 			// Send request
 			s.client.Logger.Debug(nil, fmt.Sprintf(
-				"send request to %s, method %s with key (attempt %d)", s.request.URL, s.request.Method, attempt+1,
+				"send request to %s, method %s with %s (attempt %d)", s.request.URL, s.request.Method, authTypeStr, attempt+1,
 			))
 			res, err := client.Do(s.request)
 			if err != nil {
@@ -245,10 +157,10 @@ func (s *Sender) WithKey() *Result {
 				_ = Body.Close()
 			}(res.Body)
 
-			// Handler http code error
-			if res.StatusCode != http.StatusOK {
+			// Handle HTTP status code error (support 2xx range)
+			if res.StatusCode < 200 || res.StatusCode >= 300 {
 				s.client.Logger.Debug(nil, fmt.Sprintf("received HTTP status %d, retrying...", res.StatusCode))
-				return nil // Retry on non-200 status codes
+				return nil // Retry on non-2xx status codes
 			}
 
 			// Get request result
@@ -272,18 +184,40 @@ func (s *Sender) WithKey() *Result {
 				res.StatusCode, parsed.Code, fmt.Sprint(bodyRaw),
 			))
 
-			// Check failed reason
+			// Check failed reason based on business error code
+			// Note: parsed.Code is business-layer error code (not HTTP status code)
+			// 801 = permission denied (possibly token expired)
 			if parsed.Code == 801 {
+				if authType == AuthTypeToken {
+					s.client.Logger.Debug(nil, "permission denied, maybe token expired, try to renew")
+
+					// Sleep to prevent too many requests
+					time.Sleep(time.Duration(retryDelay) * time.Second)
+
+					if s.client.exponentialBackoff {
+						retryDelay = capRetryDelay(retryDelay * 2)
+					}
+
+					if err = applyToken(s.client); err != nil {
+						return &Result{
+							client: s.client,
+							Err:    err,
+						}
+					}
+
+					return nil // Retry after token renewal
+				}
+				// For key auth, just log and retry
 				s.client.Logger.Debug(nil, "permission denied")
 
 				// Sleep to prevent too many requests
 				time.Sleep(time.Duration(retryDelay) * time.Second)
 
 				if s.client.exponentialBackoff {
-					retryDelay *= 2 // Exponential backoff
+					retryDelay = capRetryDelay(retryDelay * 2)
 				}
 
-				return nil // Retry after token renewal
+				return nil // Retry
 			}
 
 			// Return parsed result
@@ -294,12 +228,12 @@ func (s *Sender) WithKey() *Result {
 
 		// Wait before retrying
 		if attempt < s.client.maxRetries-1 {
-			s.client.Logger.Debug(nil, fmt.Sprintf("retrying in %v...", retryDelay))
+			s.client.Logger.Debug(nil, fmt.Sprintf("retrying in %d seconds...", retryDelay))
 
 			time.Sleep(time.Duration(retryDelay) * time.Second)
 
 			if s.client.exponentialBackoff {
-				retryDelay *= 2 // Exponential backoff
+				retryDelay = capRetryDelay(retryDelay * 2)
 			}
 		}
 	}
@@ -311,7 +245,29 @@ func (s *Sender) WithKey() *Result {
 	}
 }
 
-// OK returns a bool value stands for the success or not of the request
+// capRetryDelay limits the retry delay to a maximum value (MaxRetryDelaySeconds)
+// This prevents the exponential backoff from causing unreasonably long wait times
+// For example: 1s -> 2s -> 4s -> 8s -> 16s -> 32s -> 60s -> 60s -> ...
+func capRetryDelay(delay int) int {
+	if delay > MaxRetryDelaySeconds {
+		return MaxRetryDelaySeconds
+	}
+	return delay
+}
+
+// WithToken sends a request with token to authorise
+func (s *Sender) WithToken() *Result {
+	return s.doRequest(AuthTypeToken, "token")
+}
+
+// WithKey sends a request with SecretID and SecretKey to authorise
+func (s *Sender) WithKey() *Result {
+	return s.doRequest(AuthTypeKey, "key")
+}
+
+// OK returns whether the business-layer API call was successful
+// It checks if Code (business error code) == 200, which indicates success
+// This is different from HTTP status code (res.StatusCode), which is checked separately
 func (r *Result) OK() bool {
 	return r.Code == 200
 }

@@ -5,13 +5,11 @@ import (
 	"runtime"
 )
 
-const Endpoint = "https://api.gh.ink/v3"
+const Endpoint = "https://api.gh.ink/v3.1"
 
 var Version = [3]int{3, 0, 0}
 var UserAgent = fmt.Sprintf(
-	"GhinkOpenAPISDK-Go/%d.%d.%d (%s; %s)",
+	"GhinkOpenAPISDK-20260512-Go/%d.%d.%d (%s; %s)",
 	Version[0], Version[1], Version[2],
 	runtime.GOOS, runtime.GOARCH,
 )
-
-type MapAny map[string]any

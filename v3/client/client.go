@@ -6,7 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"go.gh.ink/openapi/sdk/20260422/v3"
+	"go.gh.ink/openapi/sdk/20260512/v3"
+	"go.gh.ink/openapi/sdk/20260512/v3/errors"
 )
 
 // Client provides basic struct for client object
@@ -64,20 +65,33 @@ func WithTimeout(timeout int) Option {
 }
 
 // WithMaxRetries sets max retries for request
+// If maxRetries <= 0, defaults to DefaultMaxRetries (5 attempts)
 func WithMaxRetries(maxRetries int) Option {
+	if maxRetries <= 0 {
+		maxRetries = DefaultMaxRetries
+	}
 	return func(c *Client) {
 		c.maxRetries = maxRetries
 	}
 }
 
-// WithRetryDelay sets retry delay for request
+// WithRetryDelay sets initial retry delay for request in seconds
+// The actual delay grows exponentially if exponential backoff is enabled,
+// but is capped at MaxRetryDelaySeconds (60 seconds)
+// If retryDelay <= 0, defaults to DefaultRetryDelaySeconds (1 second)
 func WithRetryDelay(retryDelay int) Option {
+	if retryDelay <= 0 {
+		retryDelay = DefaultRetryDelaySeconds
+	}
 	return func(c *Client) {
 		c.retryDelay = retryDelay
 	}
 }
 
-// WithExponentialBackoff sets exponential backoff for request
+// WithExponentialBackoff enables/disables exponential backoff for request retries
+// When enabled (true), retry delays grow exponentially: delay = delay * 2
+// Delays are capped at MaxRetryDelaySeconds (60 seconds)
+// By default, exponential backoff is enabled (DefaultExponentialBackoff = true)
 func WithExponentialBackoff(exponentialBackoff bool) Option {
 	return func(c *Client) {
 		c.exponentialBackoff = exponentialBackoff
@@ -100,7 +114,7 @@ func (c *Client) GetEndpoint() string {
 func applyToken(c *Client) error {
 	// Send request
 	result := c.Send(
-		strings.Join([]string{c.endpoint, "/openAPI/token"}, ""),
+		strings.Join([]string{c.endpoint, "/openapi/token"}, ""),
 		http.MethodGet,
 		nil,
 	).WithKey()
@@ -108,7 +122,10 @@ func applyToken(c *Client) error {
 		c.Logger.Error(nil, fmt.Sprintf(
 			"failed to get token, sender error: %s", result.Err.Error(),
 		))
-		return result.Err
+		return errors.ErrTokenAcquisitionFailed.
+			WithApiCode(result.Code).
+			WithApiMessage(result.Msg).
+			WithResponse(result)
 	}
 
 	// Check status code
@@ -116,7 +133,10 @@ func applyToken(c *Client) error {
 		c.Logger.Error(nil, fmt.Sprintf(
 			"failed to get token, upstream failed: code: %d, msg: %s", result.Code, result.Msg,
 		))
-		return fmt.Errorf("failed to get token, upstream failed: code: %d, msg: %s", result.Code, result.Msg)
+		return errors.ErrTokenAcquisitionFailed.
+			WithApiCode(result.Code).
+			WithApiMessage(result.Msg).
+			WithResponse(result)
 	}
 
 	// Build token struct
@@ -127,9 +147,12 @@ func applyToken(c *Client) error {
 	// Unmarshal token data
 	if err := result.Unmarshal(&token); err != nil {
 		c.Logger.Error(nil, fmt.Sprintf(
-			"failed to get token, unmarshal error: %s", result.Err.Error(),
+			"failed to get token, unmarshal error: %s", err.Error(),
 		))
-		return err
+		return errors.ErrTokenUnmarshalFailed.
+			WithApiCode(result.Code).
+			WithApiMessage(result.Msg).
+			WithResponse(result)
 	}
 
 	// Save token
@@ -152,11 +175,11 @@ func NewClient(secretID string, secretKey string, options ...Option) (*Client, e
 	client.marshal = json.Marshal
 	client.unmarshal = json.Unmarshal
 
-	// Load default maxRetries and retryDelay
-	client.timeout = 3
-	client.maxRetries = 5
-	client.retryDelay = 1
-	client.exponentialBackoff = true
+	// Load default timeout and retry configuration (all in seconds)
+	client.timeout = DefaultTimeoutSeconds                // 3 seconds timeout
+	client.maxRetries = DefaultMaxRetries                 // 5 retry attempts
+	client.retryDelay = DefaultRetryDelaySeconds          // 1-second initial delay
+	client.exponentialBackoff = DefaultExponentialBackoff // Enable exponential backoff
 
 	// Enable token in default
 	client.enableToken = true
