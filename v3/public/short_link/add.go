@@ -40,6 +40,7 @@ func Add(c *client.Client, link string, validity *time.Time) (ok string, err err
 		return "", errors.ErrRequestSendFailed.
 			WithApiCode(result.Code).
 			WithApiMessage(result.Msg).
+			WithRequestID(result.RequestID).
 			WithResponse(result)
 	}
 
@@ -51,6 +52,7 @@ func Add(c *client.Client, link string, validity *time.Time) (ok string, err err
 		return "", errors.ErrStatusError.
 			WithApiCode(result.Code).
 			WithApiMessage(result.Msg).
+			WithRequestID(result.RequestID).
 			WithResponse(result)
 	}
 
@@ -67,6 +69,7 @@ func Add(c *client.Client, link string, validity *time.Time) (ok string, err err
 		return "", errors.ErrResponseUnmarshalFailed.
 			WithApiCode(result.Code).
 			WithApiMessage(result.Msg).
+			WithRequestID(result.RequestID).
 			WithResponse(result)
 	}
 

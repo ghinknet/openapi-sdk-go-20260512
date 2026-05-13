@@ -115,6 +115,7 @@ func VerifyCNID(c *client.Client, id string, name string) (ok bool, err error) {
 		return false, errors.ErrRequestSendFailed.
 			WithApiCode(result.Code).
 			WithApiMessage(result.Msg).
+			WithRequestID(result.RequestID).
 			WithResponse(result)
 	}
 
@@ -126,6 +127,7 @@ func VerifyCNID(c *client.Client, id string, name string) (ok bool, err error) {
 		return false, errors.ErrStatusError.
 			WithApiCode(result.Code).
 			WithApiMessage(result.Msg).
+			WithRequestID(result.RequestID).
 			WithResponse(result)
 	}
 
@@ -142,6 +144,7 @@ func VerifyCNID(c *client.Client, id string, name string) (ok bool, err error) {
 		return false, errors.ErrResponseUnmarshalFailed.
 			WithApiCode(result.Code).
 			WithApiMessage(result.Msg).
+			WithRequestID(result.RequestID).
 			WithResponse(result)
 	}
 

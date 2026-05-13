@@ -125,6 +125,7 @@ func applyToken(c *Client) error {
 		return errors.ErrTokenAcquisitionFailed.
 			WithApiCode(result.Code).
 			WithApiMessage(result.Msg).
+			WithRequestID(result.RequestID).
 			WithResponse(result)
 	}
 
@@ -136,6 +137,7 @@ func applyToken(c *Client) error {
 		return errors.ErrTokenAcquisitionFailed.
 			WithApiCode(result.Code).
 			WithApiMessage(result.Msg).
+			WithRequestID(result.RequestID).
 			WithResponse(result)
 	}
 
@@ -152,6 +154,7 @@ func applyToken(c *Client) error {
 		return errors.ErrTokenUnmarshalFailed.
 			WithApiCode(result.Code).
 			WithApiMessage(result.Msg).
+			WithRequestID(result.RequestID).
 			WithResponse(result)
 	}
 

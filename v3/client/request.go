@@ -15,11 +15,12 @@ import (
 // Note: Code is the business-logic error code from API response (not HTTP status code)
 // HTTP status codes are handled before parsing and are in the range 200-299 for success
 type Result struct {
-	client *Client
-	Code   int    // Business error code from API response (200 = success, 801 = permission denied, etc.)
-	Msg    string // Business error message from API response
-	Body   []byte // Parsed response body (typically the "data" field from API response)
-	Err    error  // Error during request/response processing (not API business logic errors)
+	client    *Client
+	Code      int    // Business error code from API response (200 = success, 801 = permission denied, etc.)
+	Msg       string // Business error message from API response
+	Body      []byte // Parsed response body (typically the "data" field from API response)
+	Err       error  // Error during request/response processing (not API business logic errors)
+	RequestID string // Request ID for tracing
 }
 
 // Sender provides a basic struct to send request
@@ -70,12 +71,14 @@ func (c *Client) Send(url string, method string, payload any) *Sender {
 	}
 }
 
+const requestIDHeader = "x-request-id"
+
 // parse returns parsed body data from API response
 // It extracts the business-layer error code (result.Code), message (result.Msg),
 // and data field from the API response JSON
 // Note: The Code field is business-logic error code (e.g., 200 = success, 801 = permission denied),
 // NOT the HTTP status code (which is in res.StatusCode)
-func (s *Sender) parse(body []byte) *Result {
+func (s *Sender) parse(body []byte, requestID string) *Result {
 	var result struct {
 		Code int    `json:"code"`    // Business error code
 		Msg  string `json:"msg"`     // Business error message
@@ -85,8 +88,9 @@ func (s *Sender) parse(body []byte) *Result {
 	// unmarshal body
 	if err := s.client.unmarshal(body, &result); err != nil {
 		return &Result{
-			client: s.client,
-			Err:    err,
+			client:    s.client,
+			Err:       err,
+			RequestID: requestID,
 		}
 	}
 
@@ -94,17 +98,19 @@ func (s *Sender) parse(body []byte) *Result {
 	dataBody, err := s.client.marshal(result.Data)
 	if err != nil {
 		return &Result{
-			client: s.client,
-			Err:    err,
+			client:    s.client,
+			Err:       err,
+			RequestID: requestID,
 		}
 	}
 
 	// Return full result
 	return &Result{
-		client: s.client,
-		Code:   result.Code,
-		Msg:    result.Msg,
-		Body:   dataBody,
+		client:    s.client,
+		Code:      result.Code,
+		Msg:       result.Msg,
+		Body:      dataBody,
+		RequestID: requestID,
 	}
 }
 
@@ -133,6 +139,7 @@ func (s *Sender) doRequest(authType AuthType, authTypeStr string) *Result {
 
 	// Copy retry delay
 	retryDelay := s.client.retryDelay
+	var lastRequestID string
 
 	for attempt := 0; attempt < s.client.maxRetries; attempt++ {
 		if result := func() *Result {
@@ -157,31 +164,45 @@ func (s *Sender) doRequest(authType AuthType, authTypeStr string) *Result {
 				_ = Body.Close()
 			}(res.Body)
 
+			requestID := res.Header.Get(requestIDHeader)
+			if requestID != "" {
+				lastRequestID = requestID
+			}
+
 			// Handle HTTP status code error (support 2xx range)
 			if res.StatusCode < 200 || res.StatusCode >= 300 {
-				s.client.Logger.Debug(nil, fmt.Sprintf("received HTTP status %d, retrying...", res.StatusCode))
+				s.client.Logger.Debug(nil, fmt.Sprintf(
+					"received HTTP status %d, requestID %s, retrying...",
+					res.StatusCode, requestID,
+				))
 				return nil // Retry on non-2xx status codes
 			}
 
 			// Get request result
 			body, err := io.ReadAll(res.Body)
 			if err != nil {
-				s.client.Logger.Debug(nil, fmt.Sprintf("failed to read response body: %v, retrying...", err))
+				s.client.Logger.Debug(nil, fmt.Sprintf(
+					"failed to read response body: %v, requestID %s, retrying...",
+					err, requestID,
+				))
 				return nil // Retry on body read errors
 			}
 
 			// Parse result
-			parsed := s.parse(body)
+			parsed := s.parse(body, requestID)
 
 			// Output log
 			var bodyRaw any
 			if err = s.client.unmarshal(body, &bodyRaw); err != nil {
-				s.client.Logger.Debug(nil, fmt.Sprintf("failed to unmarshal response body: %v, retrying...", err))
+				s.client.Logger.Debug(nil, fmt.Sprintf(
+					"failed to unmarshal response body: %v, requestID %s, retrying...",
+					err, requestID,
+				))
 				return nil // Retry on unmarshal errors
 			}
 			s.client.Logger.Debug(nil, fmt.Sprintf(
-				"openAPI response httpCode %d, apiCode %d, responseBody %s",
-				res.StatusCode, parsed.Code, fmt.Sprint(bodyRaw),
+				"openAPI response httpCode %d, apiCode %d, requestID %s, responseBody %s",
+				res.StatusCode, parsed.Code, requestID, fmt.Sprint(bodyRaw),
 			))
 
 			// Check failed reason based on business error code
@@ -189,7 +210,10 @@ func (s *Sender) doRequest(authType AuthType, authTypeStr string) *Result {
 			// 801 = permission denied (possibly token expired)
 			if parsed.Code == 801 {
 				if authType == AuthTypeToken {
-					s.client.Logger.Debug(nil, "permission denied, maybe token expired, try to renew")
+					s.client.Logger.Debug(nil, fmt.Sprintf(
+						"permission denied, maybe token expired, try to renew, requestID %s",
+						requestID,
+					))
 
 					// Sleep to prevent too many requests
 					time.Sleep(time.Duration(retryDelay) * time.Second)
@@ -208,7 +232,7 @@ func (s *Sender) doRequest(authType AuthType, authTypeStr string) *Result {
 					return nil // Retry after token renewal
 				}
 				// For key auth, just log and retry
-				s.client.Logger.Debug(nil, "permission denied")
+				s.client.Logger.Debug(nil, fmt.Sprintf("permission denied, requestID %s", requestID))
 
 				// Sleep to prevent too many requests
 				time.Sleep(time.Duration(retryDelay) * time.Second)
@@ -228,7 +252,14 @@ func (s *Sender) doRequest(authType AuthType, authTypeStr string) *Result {
 
 		// Wait before retrying
 		if attempt < s.client.maxRetries-1 {
-			s.client.Logger.Debug(nil, fmt.Sprintf("retrying in %d seconds...", retryDelay))
+			if lastRequestID != "" {
+				s.client.Logger.Debug(nil, fmt.Sprintf(
+					"retrying in %d seconds..., requestID %s",
+					retryDelay, lastRequestID,
+				))
+			} else {
+				s.client.Logger.Debug(nil, fmt.Sprintf("retrying in %d seconds...", retryDelay))
+			}
 
 			time.Sleep(time.Duration(retryDelay) * time.Second)
 
