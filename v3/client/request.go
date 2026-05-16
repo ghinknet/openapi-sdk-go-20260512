@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ type Sender struct {
 	client  *Client
 	request *http.Request
 	err     error
+	payload []byte
 }
 
 // AuthType defines the authentication method
@@ -37,6 +39,7 @@ type AuthType int
 func (c *Client) Send(url string, method string, payload any) *Sender {
 	// Process payload
 	var finalPayload io.Reader = nil
+	var payloadBytes []byte
 	if payload != nil {
 		// Marshal payload
 		jsonPayload, err := c.marshal(payload)
@@ -46,6 +49,7 @@ func (c *Client) Send(url string, method string, payload any) *Sender {
 				err:    err,
 			}
 		}
+		payloadBytes = jsonPayload
 		finalPayload = strings.NewReader(string(jsonPayload))
 	}
 
@@ -68,6 +72,7 @@ func (c *Client) Send(url string, method string, payload any) *Sender {
 		client:  c,
 		request: req,
 		err:     nil,
+		payload: payloadBytes,
 	}
 }
 
@@ -80,9 +85,9 @@ const requestIDHeader = "x-request-id"
 // NOT the HTTP status code (which is in res.StatusCode)
 func (s *Sender) parse(body []byte, requestID string) *Result {
 	var result struct {
-		Code int    `json:"code"`    // Business error code
-		Msg  string `json:"msg"`     // Business error message
-		Data any    `json:"data"`    // Business response data
+		Code int    `json:"code"` // Business error code
+		Msg  string `json:"msg"`  // Business error message
+		Data any    `json:"data"` // Business response data
 	}
 
 	// unmarshal body
@@ -115,16 +120,40 @@ func (s *Sender) parse(body []byte, requestID string) *Result {
 }
 
 // setupAuthHeader sets authorisation header based on auth type
-func (s *Sender) setupAuthHeader(authType AuthType) {
+func (s *Sender) setupAuthHeader(req *http.Request, authType AuthType) {
 	switch authType {
 	case AuthTypeToken:
-		s.request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.client.token))
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.client.token))
 	case AuthTypeKey:
 		credentials := strings.Join([]string{s.client.secretID, s.client.secretKey}, ":")
 		encoded := base64.StdEncoding.EncodeToString([]byte(credentials))
-		s.request.Header.Set("Authorization", strings.Join([]string{"Basic", encoded}, " "))
+		req.Header.Set("Authorization", strings.Join([]string{"Basic", encoded}, " "))
 	}
-	s.request.Header.Set("User-Agent", openapi.UserAgent)
+	req.Header.Set("User-Agent", openapi.UserAgent)
+}
+
+// newRequest returns a clone of the base request with a fresh body when possible
+func (s *Sender) newRequest(attempt int) (*http.Request, error) {
+	req := s.request.Clone(s.request.Context())
+	if s.request.GetBody == nil {
+		if len(s.payload) > 0 {
+			req.Body = io.NopCloser(bytes.NewReader(s.payload))
+			req.GetBody = func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(s.payload)), nil
+			}
+			return req, nil
+		}
+		if s.request.Body != nil && attempt > 0 {
+			return nil, fmt.Errorf("request body is not rewindable; retries are not possible")
+		}
+		return req, nil
+	}
+	body, err := s.request.GetBody()
+	if err != nil {
+		return nil, err
+	}
+	req.Body = body
+	return req, nil
 }
 
 // doRequest executes the common request retry logic
@@ -148,14 +177,22 @@ func (s *Sender) doRequest(authType AuthType, authTypeStr string) *Result {
 				Timeout: time.Duration(s.client.timeout) * time.Second,
 			}
 
+			req, err := s.newRequest(attempt)
+			if err != nil {
+				return &Result{
+					client: s.client,
+					Err:    err,
+				}
+			}
+
 			// Add headers
-			s.setupAuthHeader(authType)
+			s.setupAuthHeader(req, authType)
 
 			// Send request
 			s.client.Logger.Debug(nil, fmt.Sprintf(
-				"send request to %s, method %s with %s (attempt %d)", s.request.URL, s.request.Method, authTypeStr, attempt+1,
+				"send request to %s, method %s with %s (attempt %d)", req.URL, req.Method, authTypeStr, attempt+1,
 			))
-			res, err := client.Do(s.request)
+			res, err := client.Do(req)
 			if err != nil {
 				s.client.Logger.Debug(nil, fmt.Sprintf("request failed: %v, retrying...", err))
 				return nil // Retry on network errors
